@@ -1,0 +1,6 @@
+[workspace]
+members = [
+  "swamp",
+  "swamp-codegen",
+  "swamp-build",
+]
