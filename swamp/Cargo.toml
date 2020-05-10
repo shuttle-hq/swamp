@@ -13,3 +13,5 @@ swamp-build = { path = "../swamp-build" }
 swamp-codegen = { path = "../swamp-codegen" }
 
 sha2 = "*"
+pretty_assertions = "0.6.1"
+regex = "1.3.7"

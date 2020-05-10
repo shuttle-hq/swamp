@@ -1,4 +1,6 @@
-#[derive(Debug, Clone)]
+use regex::Regex;
+
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum TypeError {
     /// Block is invalid type because a required field is missing
     Missing(&'static str),
@@ -60,12 +62,12 @@ impl BlockType {
     pub fn validate_part(part: &str) -> Result<String, TypeError> {
         let valid = part
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '*');
+            .all(|c| c.is_alphanumeric() || "*-_@.".contains(c));
         if valid {
             Ok(part.to_owned())
         } else {
             let err = format!(
-                "`{}` is invalid type part (only alphanum, - or _ allowed)",
+                "`{}` is invalid type part (only alphanum, @, ., -, * or _ allowed)",
                 part
             );
             Err(TypeError::Invalid(err))
@@ -102,15 +104,24 @@ impl BlockType {
 impl std::str::FromStr for BlockType {
     type Err = TypeError;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let parts_regex =
+            Regex::new(r#""(?P<first>[^"]+)"|(?P<second>[^.]+)"#).expect("Invalid regex");
         let mut ty = None;
         let mut labels = Vec::new();
-        for part in s.split(".") {
-            Self::validate_part(part)?;
+
+        for part in parts_regex.captures_iter(s) {
+            let full_part;
+            if part.name("first").is_some() {
+                full_part = &part["first"];
+            } else {
+                full_part = &part["second"];
+            }
+            Self::validate_part(full_part)?;
 
             if ty.is_none() {
-                ty = Some(part.to_owned());
+                ty = Some(full_part.to_owned());
             } else {
-                labels.push(part.to_owned());
+                labels.push(full_part.to_owned());
             }
         }
         Ok(Self {
@@ -123,11 +134,16 @@ impl std::str::FromStr for BlockType {
 }
 
 impl std::fmt::Display for BlockType {
-    /// FIXME: sanitize
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.ty)?;
+        match self.ty.contains(".") {
+            true => write!(f, "\"{}\"", self.ty)?,
+            false => write!(f, "{}", self.ty)?,
+        }
         for label in self.labels.iter() {
-            write!(f, ".{}", label)?;
+            match label.contains(".") {
+                true => write!(f, ".\"{}\"", label)?,
+                false => write!(f, ".{}", label)?,
+            }
         }
         Ok(())
     }
@@ -180,7 +196,7 @@ impl<'a> TokenStream<'a> {
         Ok(self)
     }
 
-    pub fn done(mut self) -> Result<(BlockType, Self), TypeError> {
+    pub fn done(self) -> Result<(BlockType, Self), TypeError> {
         let mut iter = self.ty.into_iter();
         let ty = iter.next().ok_or(TypeError::Invalid("empty".to_string()))?;
 
@@ -211,4 +227,97 @@ pub trait Label {
 pub trait Block {
     fn block_type(&self) -> Result<BlockType, TypeError>;
     fn parse_block_type(s: TokenStream) -> Result<(BlockType, TokenStream), TypeError>;
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use crate::block_type;
+    use pretty_assertions::assert_eq;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_block_type_from_str() {
+        let expected_block_type = BlockType {
+            ty: "resource".to_owned(),
+            labels: vec!["user".to_string(), "john.smith@openquery.io".to_string()],
+        };
+        // Test from_str
+        assert_eq!(
+            expected_block_type,
+            BlockType::from_str(r#"resource.user."john.smith@openquery.io""#).unwrap()
+        );
+        // Test invalid input for from_str
+        assert_eq!(
+            BlockType::from_str(r#"resource.user.john.smith@openquery.io""#),
+            Err(TypeError::Invalid(
+                "`io\"` is invalid type part (only alphanum, @, ., -, * or _ allowed)".to_owned()
+            ))
+        );
+        // Test macro
+        assert_eq!(
+            expected_block_type,
+            block_type!("resource"."user"."john.smith@openquery.io")
+        );
+
+        // Edge case where the input feeded in the macro is just one string
+        assert_eq!(
+            block_type!("resource.user.\"john.smith@openquery.io\""),
+            BlockType {
+                ty: "resource.user.\"john.smith@openquery.io\"".to_string(),
+                labels: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_block_type_display() {
+        // No character escaping needed
+        let block_type = BlockType {
+            ty: "resource".to_owned(),
+            labels: vec!["user".to_string(), "johnsmith".to_string()],
+        };
+        assert_eq!(format!("{}", block_type), "resource.user.johnsmith");
+
+        // User's email address should be in quote as it contains periods
+        let block_type = BlockType {
+            ty: "resource".to_owned(),
+            labels: vec!["user".to_string(), "john.smith@openquery.io".to_string()],
+        };
+        assert_eq!(
+            format!("{}", block_type),
+            "resource.user.\"john.smith@openquery.io\""
+        );
+
+        // Resource name also contains a period
+        let block_type = BlockType {
+            ty: "main.resource".to_owned(),
+            labels: vec!["user".to_string(), "john.smith@openquery.io".to_string()],
+        };
+        assert_eq!(
+            format!("{}", block_type),
+            "\"main.resource\".user.\"john.smith@openquery.io\""
+        );
+    }
+
+    #[test]
+    fn test_block_type_roundtrip() {
+        // No escaping
+        assert_eq!(
+            BlockType {
+                ty: "resource".to_owned(),
+                labels: vec!["user".to_string(), "john".to_string()],
+            },
+            block_type!("resource"."user"."john")
+        );
+
+        // Some escaping required
+        assert_eq!(
+            BlockType {
+                ty: "resource".to_owned(),
+                labels: vec!["user".to_string(), "john.smith@openquery.io".to_string()],
+            },
+            block_type!("resource"."user"."john.smith@openquery.io")
+        );
+    }
 }
